@@ -1,2 +1,8 @@
 .vscode
 .opencode
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+.mvn/wrapper/maven-wrapper.jar
