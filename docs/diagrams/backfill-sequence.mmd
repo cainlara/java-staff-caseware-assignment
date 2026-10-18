@@ -1,0 +1,18 @@
+sequenceDiagram
+  participant OPS as Operator/flag
+  participant BF as Backfill worker
+  participant CDB as Customer DBs (owner-operated export)
+  participant DN as Downstream load pool (C=20, ~1 min/load)
+  participant IDX as Pending Update Index
+
+  OPS->>BF: enable backfill (rate limit C, checkpoint dir)
+  loop Batches until complete
+    BF->>CDB: enumerate next engagement batch
+    BF->>DN: bounded loads (in-flight <= C)
+    DN-->>BF: template_version per engagement
+    BF->>IDX: idempotent row writes
+    BF->>BF: external checkpoint advance
+  end
+  Note over BF,IDX: kill process at any point then restart resumes from checkpoint. Never exceeds C. Haltable within minutes
+  OPS->>BF: halt flag
+  BF->>BF: stop admission, flush in-flight, persist checkpoint

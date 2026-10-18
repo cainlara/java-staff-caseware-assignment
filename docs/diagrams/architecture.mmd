@@ -1,0 +1,11 @@
+flowchart LR
+  TDB[(Product Template DB<br/>owns templates/versions)] -->|TemplatePublished /<br/>TemplateWithdrawn hooks| Q[Event bus<br/>at-least-once]
+  EMS[Engagement Mgmt System] -->|EngagementCreated hook<br/>version capture| Q
+  Q --> W[Fan-out / index writer<br/>idempotent, fair sharding]
+  Q --> S[Summary pipeline<br/>diff only, once per version pair]
+  S --> SS[(Summary store<br/>template-only artifacts)]
+  W --> P[(Pending Update Index<br/>per region, no content)]
+  UI[Application UI tier] -->|read / DecisionRecorded| P
+  R[Reconciliation scanner] --> Q
+  R --> P
+  TDB -. version DAG + publish history .-> R
