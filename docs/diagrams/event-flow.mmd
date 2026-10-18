@@ -1,0 +1,20 @@
+sequenceDiagram
+  participant TDB as Product Template DB
+  participant BUS as Event bus
+  participant SUM as Summary pipeline
+  participant IDX as Pending Update Index (in-region)
+  participant UI as UI tier / user
+
+  TDB->>BUS: TemplatePublished (publish_id, product, version, diff_ref)
+  par parallel
+    BUS->>SUM: generate/lookup summary (diff only)
+    SUM->>IDX: (summary_key ready)
+  and
+    BUS->>IDX: fan-out rows for eligible engagements (from index, no loads)
+  end
+  UI->>IDX: list pending (reads index)
+  UI->>BUS: DecisionRecorded (apply|decline, pins)
+  BUS->>IDX: SM-3 apply / SM-4 decline
+  TDB->>BUS: TemplateWithdrawn (withdraw_id)
+  BUS->>IDX: supersede rows offering withdrawn version
+  Note over TDB,BUS: hourly PublishHistorySnapshot for reconciliation

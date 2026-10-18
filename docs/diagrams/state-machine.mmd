@@ -1,0 +1,12 @@
+stateDiagram-v2
+  [*] --> created
+  created --> pending: eligible publish
+  pending --> pending: newer publish (accumulate)
+  pending --> applied: decision: apply
+  pending --> declined: decision: decline
+  pending --> created: offered version withdrawn, no successor
+  pending --> pending: withdrawn, newer eligible version exists
+  declined --> pending: publish with out-of-pin changes
+  applied --> pending: new publish vs applied version
+  applied --> [*]
+  declined --> [*]
