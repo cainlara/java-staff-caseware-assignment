@@ -40,4 +40,11 @@ public final class InMemoryCheckpointStore implements CheckpointStore {
         Objects.requireNonNull(value, "value must not be null");
         backing.put(key, value);
     }
+
+    @Override
+    public boolean writeIfAbsent(CheckpointKey key, String value) {
+        Objects.requireNonNull(key, "key must not be null");
+        Objects.requireNonNull(value, "value must not be null");
+        return backing.putIfAbsent(key, value) == null;
+    }
 }

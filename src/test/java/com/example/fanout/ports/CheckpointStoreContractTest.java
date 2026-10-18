@@ -86,4 +86,79 @@ class CheckpointStoreContractTest {
                 .isThrownBy(() -> new CheckpointKey(CheckpointKind.PUBLISH, "  "))
                 .withMessageContaining("id");
     }
+
+    // ---- v2: writeIfAbsent atomic claim (contracts/checkpoint-store.md) ----
+
+    @Test
+    void writeIfAbsentOnAbsentKeyWritesAndReturnsTrue() {
+        var store = new InMemoryCheckpointStore();
+        assertThat(store.writeIfAbsent(PUBLISH, "claim-1")).isTrue();
+        assertThat(store.read(PUBLISH)).isEqualTo(Optional.of("claim-1"));
+    }
+
+    @Test
+    void writeIfAbsentSecondClaimLosesFirstValueWins() {
+        var store = new InMemoryCheckpointStore();
+        assertThat(store.writeIfAbsent(PUBLISH, "first")).isTrue();
+        assertThat(store.writeIfAbsent(PUBLISH, "second")).isFalse();
+        assertThat(store.read(PUBLISH)).isEqualTo(Optional.of("first"));
+    }
+
+    @Test
+    void concurrentWriteIfAbsentHasExactlyOneWinner() throws Exception {
+        var store = new InMemoryCheckpointStore();
+        int threads = 8;
+        var barrier = new java.util.concurrent.CyclicBarrier(threads);
+        var winners = new java.util.concurrent.atomic.AtomicInteger();
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        try {
+            for (int i = 0; i < threads; i++) {
+                final int n = i;
+                pool.submit(() -> {
+                    try {
+                        barrier.await();
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                    if (store.writeIfAbsent(PUBLISH, "winner-" + n)) {
+                        winners.incrementAndGet();
+                    }
+                });
+            }
+            pool.shutdown();
+            assertThat(pool.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(winners.get()).isEqualTo(1);
+    }
+
+    @Test
+    void defaultMethodCompatibleWithReadOnlyImplementations() {
+        CheckpointStore legacy = new CheckpointStore() {
+            private final java.util.Map<CheckpointKey, String> map = new java.util.HashMap<>();
+
+            @Override
+            public Optional<String> read(CheckpointKey key) {
+                return Optional.ofNullable(map.get(key));
+            }
+
+            @Override
+            public void write(CheckpointKey key, String value) {
+                map.put(key, value);
+            }
+        };
+        assertThat(legacy.writeIfAbsent(PUBLISH, "v")).isTrue();
+        assertThat(legacy.writeIfAbsent(PUBLISH, "w")).isFalse();
+        assertThat(legacy.read(PUBLISH)).isEqualTo(Optional.of("v"));
+    }
+
+    @Test
+    void writeIfAbsentRejectsNullOrBlankIdAndNullValue() {
+        var store = new InMemoryCheckpointStore();
+        org.assertj.core.api.Assertions.assertThatNullPointerException()
+                .isThrownBy(() -> store.writeIfAbsent(null, "x"));
+        org.assertj.core.api.Assertions.assertThatNullPointerException()
+                .isThrownBy(() -> store.writeIfAbsent(PUBLISH, null));
+    }
 }
