@@ -21,4 +21,18 @@ public interface FanOutMetrics {
     void increment(String name, long delta, String... tags);
 
     void recordTime(String name, Duration duration, String... tags);
+
+    /**
+     * Optional gauge hook: sets the current value of a named gauge. Default
+     * no-op, so existing implementations stay source-compatible (constitution
+     * VII).
+     *
+     * <p>Same confidentiality invariant as {@link #increment} and
+     * {@link #recordTime}: engagement content MUST NEVER appear in
+     * {@code name} or {@code tags}; only identifiers and measurements.
+     *
+     * <p>{@code name} MUST be non-blank and {@code tags} MUST be even-length
+     * key/value pairs.
+     */
+    default void gauge(String name, double value, String... tags) { }
 }

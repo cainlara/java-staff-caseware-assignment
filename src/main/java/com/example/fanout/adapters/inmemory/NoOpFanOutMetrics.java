@@ -27,6 +27,19 @@ public final class NoOpFanOutMetrics implements FanOutMetrics {
         Objects.requireNonNull(tags, "tags must not be null");
     }
 
+    @Override
+    public void gauge(String name, double value, String... tags) {
+        validateName(name);
+        Objects.requireNonNull(tags, "tags must not be null");
+        validateTagPairs(tags);
+    }
+
+    private static void validateTagPairs(String[] tags) {
+        if (tags.length % 2 != 0) {
+            throw new IllegalArgumentException("tags must be even-length key/value pairs");
+        }
+    }
+
     private static void validateName(String name) {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("name must be non-blank");

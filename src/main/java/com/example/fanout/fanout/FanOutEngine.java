@@ -15,18 +15,25 @@ import com.example.fanout.domain.FanOutTriggerKind;
 import com.example.fanout.domain.PendingIndexRow;
 import com.example.fanout.domain.PendingIndexState;
 import com.example.fanout.ingest.IngestedPublish;
+import com.example.fanout.observability.IdentifierField;
+import com.example.fanout.observability.LogLevel;
+import com.example.fanout.observability.NoOpStructuredLogSink;
 import com.example.fanout.ports.DeadLetterStore;
 import com.example.fanout.ports.EngagementEligibilitySource;
 import com.example.fanout.ports.FanOutMetrics;
 import com.example.fanout.ports.IndexWriter;
+import com.example.fanout.ports.StructuredLogSink;
 import com.example.fanout.ports.WriteResult;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -66,6 +73,7 @@ public final class FanOutEngine {
     private final Clock clock;
     private final RetryExecutor retryExecutor;
     private final AdmissionGate gate;
+    private final StructuredLogSink logSink;
 
     /** In-process live-run registry: one live runner per run identity. */
     private final Set<RunKey> activeRuns = ConcurrentHashMap.newKeySet();
@@ -98,6 +106,24 @@ public final class FanOutEngine {
             Clock clock,
             JitterSource jitterSource,
             AdmissionGate gate) {
+        this(eligibility, indexWriter, cursors, deadLetterStore, metrics, config, taskRunner,
+                backoffWaiter, clock, jitterSource, gate, new NoOpStructuredLogSink());
+    }
+
+    /** Log-injecting constructor (spec 005, FR-004). */
+    public FanOutEngine(
+            EngagementEligibilitySource eligibility,
+            IndexWriter indexWriter,
+            FanOutCursorRepository cursors,
+            DeadLetterStore deadLetterStore,
+            FanOutMetrics metrics,
+            FanOutConfig config,
+            TaskRunner taskRunner,
+            BackoffWaiter backoffWaiter,
+            Clock clock,
+            JitterSource jitterSource,
+            AdmissionGate gate,
+            StructuredLogSink logSink) {
         this.eligibility = Objects.requireNonNull(eligibility, "eligibility must not be null");
         this.indexWriter = Objects.requireNonNull(indexWriter, "indexWriter must not be null");
         this.cursors = Objects.requireNonNull(cursors, "cursors must not be null");
@@ -109,8 +135,9 @@ public final class FanOutEngine {
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         Objects.requireNonNull(jitterSource, "jitterSource must not be null");
         this.gate = Objects.requireNonNull(gate, "gate must not be null");
+        this.logSink = Objects.requireNonNull(logSink, "logSink must not be null");
         this.retryExecutor = new RetryExecutor(config, backoffWaiter, clock, jitterSource,
-                metrics, deadLetterStore);
+                metrics, deadLetterStore, logSink);
     }
 
     // ---- entry points ----
@@ -147,7 +174,9 @@ public final class FanOutEngine {
                     trigger.eventId(), 0, 0, 0);
         }
         try {
-            return executeRun(trigger, kind, start);
+            FanOutRunOutcome outcome = executeRun(trigger, kind, start);
+            logRunCompletion(outcome, trigger, kind);
+            return outcome;
         } finally {
             activeRuns.remove(runKey);
         }
@@ -156,6 +185,9 @@ public final class FanOutEngine {
     private FanOutRunOutcome executeRun(FanOutTrigger trigger, FanOutRunKind kind, Instant start) {
         String eventId = trigger.eventId();
         String productId = trigger.productId();
+        String publishId = publishIdFor(kind, trigger);
+        logSink.log(LogLevel.INFO, "fanout.run.started", start,
+                runIdentifiers(publishId, productId, null));
 
         // 1. publish: resolve to-version (phase-2 record is the source of truth);
         //    supersede: resolve withdrawn version + record durable marker + pick next
@@ -183,6 +215,8 @@ public final class FanOutEngine {
                 return new FanOutRunOutcome(FanOutOutcomeStatus.FAILED_DEAD_LETTERED,
                         eventId, 0, 0, 1);
             }
+            logSink.log(LogLevel.INFO, "fanout.supersede.marked", clock.instant(),
+                    runIdentifiers(publishId, productId, "superseded"));
         }
 
         // 2. materialize input (R1 contract order; sorted defensively) through
@@ -240,18 +274,23 @@ public final class FanOutEngine {
             }
             startChunk = cursor.lastCompletedChunkIndex() + 1;
         }
+        if (startChunk > 0) {
+            emitCheckpointLag(productId, publishId, totalChunks, startChunk - 1);
+        }
 
         // 5. empty run: completed cursor, zero writes (FR-004 / FR-063)
         if (totalChunks == 0) {
             cursors.complete(kind, eventId, productId, 0);
-            recordPublishTimer(start, productId);
+            emitCheckpointLag(productId, publishId, totalChunks, -1);
+            recordPublishTimer(trigger, kind, start, productId);
             return new FanOutRunOutcome(FanOutOutcomeStatus.COMPLETED_EMPTY, eventId, 0, 0, 0);
         }
 
         // 6. resume continuation with nothing left: just complete (FR-051)
         if (startChunk >= totalChunks) {
             cursors.complete(kind, eventId, productId, totalChunks);
-            recordPublishTimer(start, productId);
+            emitCheckpointLag(productId, publishId, totalChunks, totalChunks - 1);
+            recordPublishTimer(trigger, kind, start, productId);
             return new FanOutRunOutcome(FanOutOutcomeStatus.COMPLETED, eventId, totalChunks, 0, 0);
         }
 
@@ -263,7 +302,7 @@ public final class FanOutEngine {
 
         // 8. schedule remaining chunks through the fair scheduler on the runner,
         //    each pick re-observing live admission (halt / staged enablement)
-        var context = new RunContext(kind, eventId, productId, totalChunks,
+        var context = new RunContext(kind, eventId, productId, publishId, totalChunks,
                 kind == FanOutRunKind.PUBLISH, toVersion, nextVersion);
         List<FanOutTask> remaining = List.copyOf(chunks.subList(startChunk, totalChunks));
         var scheduler = new FairShardScheduler(remaining, config.poolBound(),
@@ -285,7 +324,8 @@ public final class FanOutEngine {
 
         // 9. complete the cursor; record the freshness timer (FR-071 / SC-010)
         cursors.complete(kind, eventId, productId, totalChunks);
-        recordPublishTimer(start, productId);
+        emitCheckpointLag(productId, publishId, totalChunks, totalChunks - 1);
+        recordPublishTimer(trigger, kind, start, productId);
 
         FanOutOutcomeStatus status = context.deadLetterCount.get() > 0
                 ? FanOutOutcomeStatus.FAILED_DEAD_LETTERED
@@ -353,6 +393,8 @@ public final class FanOutEngine {
 
     private void executeChunk(FanOutTask task, RunContext context) {
         metrics.increment("fanout.chunks.started", 1, "product_id", context.productId);
+        logSink.log(LogLevel.INFO, "fanout.chunk.started", clock.instant(),
+                chunkIdentifiers(context.publishId, context.productId, task.chunkIndex(), "pending"));
         try {
             retryExecutor.callWithRetry(context.eventId, context.productId, task.chunkIndex(),
                     DeadLetterUnitKind.CHUNK_WRITE, () -> {
@@ -372,6 +414,8 @@ public final class FanOutEngine {
         // dead-lettered chunks still advance the cursor so the run terminates;
         // the dead-letter store holds the gap for replay (contract step 5)
         metrics.increment("fanout.chunks.completed", 1, "product_id", context.productId);
+        logSink.log(LogLevel.INFO, "fanout.chunk.completed", clock.instant(),
+                chunkIdentifiers(context.publishId, context.productId, task.chunkIndex(), "pending"));
         context.markChunkResolved(task.chunkIndex());
     }
 
@@ -441,11 +485,91 @@ public final class FanOutEngine {
         deadLetterStore.store(record);
         metrics.increment("fanout.dlq", 1, "product_id", productId,
                 "unit_kind", unitKind.name());
+        Map<IdentifierField, String> dlqIdentifiers = new EnumMap<>(IdentifierField.class);
+        dlqIdentifiers.put(IdentifierField.product_id, productId);
+        dlqIdentifiers.put(IdentifierField.state, unitKind.name().toLowerCase(Locale.ROOT));
+        logSink.log(LogLevel.ERROR, "fanout.dlq", clock.instant(), dlqIdentifiers);
     }
 
-    private void recordPublishTimer(Instant start, String productId) {
+    /**
+     * Freshness SLO window (research D4): measured from the ingested
+     * publish's {@code publishedAt} to this instant — publish to last index
+     * write — tagged with {@code product_id} and {@code publish_id}.
+     */
+    private void recordPublishTimer(FanOutTrigger trigger, FanOutRunKind kind, Instant fallbackStart,
+                                    String productId) {
+        String publishId = publishIdFor(kind, trigger);
+        Instant publishedAt = fallbackStart;
+        if (publishId != null && !publishId.isBlank()) {
+            publishedAt = cursors.ingestedPublish(publishId)
+                    .map(IngestedPublish::publishedAt)
+                    .orElse(fallbackStart);
+        }
         metrics.recordTime("fanout.publish_to_pending",
-                Duration.between(start, clock.instant()), "product_id", productId);
+                Duration.between(publishedAt, clock.instant()),
+                "product_id", productId, "publish_id",
+                publishId == null ? productId : publishId);
+    }
+
+    /**
+     * Live checkpoint lag in chunks (spec 005): {@code totalChunks - 1 -
+     * lastCompletedChunkIndex}, emitted after every persisted advance, on
+     * resume, and once at COMPLETE so dashboards see the run finish.
+     */
+    private void emitCheckpointLag(String productId, String publishId,
+                                   int totalChunks, int lastCompletedChunkIndex) {
+        double lag = Math.max(0, totalChunks - 1 - lastCompletedChunkIndex);
+        metrics.gauge("fanout.checkpoint.lag.chunks", lag,
+                "product_id", productId, "publish_id",
+                publishId == null ? productId : publishId);
+    }
+
+    /** Publish identity carried by run metrics: the publish itself, or its matched publish. */
+    private static String publishIdFor(FanOutRunKind kind, FanOutTrigger trigger) {
+        return kind == FanOutRunKind.PUBLISH ? trigger.eventId() : trigger.matchedPublishId();
+    }
+
+    /** Run-level identifiers (spec 004): publish_id + product_id + optional state. */
+    private static Map<IdentifierField, String> runIdentifiers(String publishId, String productId,
+                                                               String state) {
+        Map<IdentifierField, String> identifiers = new EnumMap<>(IdentifierField.class);
+        identifiers.put(IdentifierField.publish_id, publishId == null ? productId : publishId);
+        identifiers.put(IdentifierField.product_id, productId);
+        if (state != null) {
+            identifiers.put(IdentifierField.state, state);
+        }
+        return identifiers;
+    }
+
+    /** Chunk-cadence identifiers (spec 004): never per-row on the hot path. */
+    private static Map<IdentifierField, String> chunkIdentifiers(String publishId, String productId,
+                                                                 int chunkIndex, String state) {
+        Map<IdentifierField, String> identifiers = new EnumMap<>(IdentifierField.class);
+        identifiers.put(IdentifierField.publish_id, publishId == null ? productId : publishId);
+        identifiers.put(IdentifierField.product_id, productId);
+        identifiers.put(IdentifierField.chunk_id, String.valueOf(chunkIndex));
+        identifiers.put(IdentifierField.state, state);
+        return identifiers;
+    }
+
+    /**
+     * One {@code fanout.run.completed} per executed run (spec 004): skipped
+     * duplicates never started a run, so they emit nothing.
+     */
+    private void logRunCompletion(FanOutRunOutcome outcome, FanOutTrigger trigger, FanOutRunKind kind) {
+        String state = switch (outcome.status()) {
+            case COMPLETED, COMPLETED_EMPTY -> "complete";
+            case HALTED -> "halted";
+            case GATED -> "gated";
+            case FAILED_DEAD_LETTERED -> "dead_lettered";
+            default -> null;
+        };
+        if (state == null) {
+            return;
+        }
+        String productId = trigger.productId();
+        logSink.log(LogLevel.INFO, "fanout.run.completed", clock.instant(),
+                runIdentifiers(publishIdFor(kind, trigger), productId, state));
     }
 
     /** Durable run identity: (kind, eventId, productId). */
@@ -462,6 +586,7 @@ public final class FanOutEngine {
         final FanOutRunKind kind;
         final String eventId;
         final String productId;
+        final String publishId;
         final int totalChunks;
         final boolean publishKind;
         final String toVersion;
@@ -471,11 +596,12 @@ public final class FanOutEngine {
         private final boolean[] resolvedChunks;
         private int persistedLast = -1;
 
-        RunContext(FanOutRunKind kind, String eventId, String productId, int totalChunks,
-                   boolean publishKind, String toVersion, String nextVersion) {
+        RunContext(FanOutRunKind kind, String eventId, String productId, String publishId,
+                   int totalChunks, boolean publishKind, String toVersion, String nextVersion) {
             this.kind = kind;
             this.eventId = eventId;
             this.productId = productId;
+            this.publishId = publishId;
             this.totalChunks = totalChunks;
             this.publishKind = publishKind;
             this.toVersion = toVersion;
@@ -492,6 +618,7 @@ public final class FanOutEngine {
             if (last > persistedLast && last >= 0) {
                 persistedLast = last;
                 cursors.advance(kind, eventId, productId, totalChunks, last);
+                emitCheckpointLag(productId, publishId, totalChunks, last);
             }
         }
 

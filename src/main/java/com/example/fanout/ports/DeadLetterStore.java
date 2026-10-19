@@ -29,4 +29,13 @@ public interface DeadLetterStore {
     void store(DeadLetterRecord record);
 
     List<DeadLetterRecord> byEvent(String eventId);
+
+    /**
+     * Current number of stored records (depth). Append-only semantics make
+     * depth equal the stored record count, so this is exact.
+     *
+     * <p>Source of truth for the {@code fanout.dlq.depth} gauge and the
+     * {@code DLQ_NON_EMPTY} alert — never negative.
+     */
+    long count();
 }

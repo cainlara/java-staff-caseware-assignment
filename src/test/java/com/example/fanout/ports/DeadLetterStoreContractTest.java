@@ -59,6 +59,22 @@ class DeadLetterStoreContractTest {
     }
 
     @Test
+    void emptyStoreReportsZeroDepthForAlerts() {
+        DeadLetterStore store = new FakeDeadLetterStore();
+        assertThat(store.count()).isZero();
+    }
+
+    @Test
+    void countTracksStoredRecordDepth() {
+        DeadLetterStore store = new FakeDeadLetterStore();
+        store.store(record("pub-1", 0, 1));
+        store.store(record("pub-2", 0, 1));
+        store.store(record("pub-2", 1, 1));
+
+        assertThat(store.count()).isEqualTo(3);
+    }
+
+    @Test
     void nullRecordRejectedOnStore() {
         var store = new FakeDeadLetterStore();
         org.assertj.core.api.Assertions.assertThatNullPointerException()

@@ -18,17 +18,23 @@ import com.example.fanout.fanout.TaskRunner;
 import com.example.fanout.fanout.TransientFanOutException;
 import com.example.fanout.ingest.EffectiveVersion;
 import com.example.fanout.ingest.IngestedPublish;
+import com.example.fanout.observability.IdentifierField;
+import com.example.fanout.observability.LogLevel;
+import com.example.fanout.observability.NoOpStructuredLogSink;
 import com.example.fanout.ports.DeadLetterStore;
 import com.example.fanout.ports.EngagementEnumerator;
 import com.example.fanout.ports.FanOutMetrics;
 import com.example.fanout.ports.IndexWriter;
+import com.example.fanout.ports.StructuredLogSink;
 import com.example.fanout.ports.WriteResult;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -76,6 +82,7 @@ public final class BackfillWorker {
     private final TaskRunner taskRunner;
     private final BackfillConfig config;
     private final Clock clock;
+    private final StructuredLogSink logSink;
 
     public BackfillWorker(
             EngagementEnumerator enumerator,
@@ -91,6 +98,26 @@ public final class BackfillWorker {
             TaskRunner taskRunner,
             BackfillConfig config,
             Clock clock) {
+        this(enumerator, firmIds, cursors, fanOutCursors, indexWriter, downstream, retry, gate,
+                metrics, deadLetterStore, taskRunner, config, clock, new NoOpStructuredLogSink());
+    }
+
+    /** Log-injecting constructor (spec 005, FR-004). */
+    public BackfillWorker(
+            EngagementEnumerator enumerator,
+            Collection<String> firmIds,
+            BackfillCursorRepository cursors,
+            FanOutCursorRepository fanOutCursors,
+            IndexWriter indexWriter,
+            PermitGuardedDownstream downstream,
+            RetryExecutor retry,
+            AdmissionGate gate,
+            FanOutMetrics metrics,
+            DeadLetterStore deadLetterStore,
+            TaskRunner taskRunner,
+            BackfillConfig config,
+            Clock clock,
+            StructuredLogSink logSink) {
         this.enumerator = Objects.requireNonNull(enumerator, "enumerator must not be null");
         this.firmIds = List.copyOf(new TreeSet<>(Objects.requireNonNull(
                 firmIds, "firmIds must not be null")));
@@ -105,6 +132,7 @@ public final class BackfillWorker {
         this.taskRunner = Objects.requireNonNull(taskRunner, "taskRunner must not be null");
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
+        this.logSink = Objects.requireNonNull(logSink, "logSink must not be null");
     }
 
     /**
@@ -163,7 +191,9 @@ public final class BackfillWorker {
             int completeBefore = scheduler.firmsRemaining();
             BackfillScheduler.Cycle cycle = scheduler.admitCycle();
             if (cycle.halted()) {
-                state.markHalted();
+                if (state.markHalted()) {
+                    logHalt(null, null);
+                }
             }
 
             launchCycle(cycle.admitted(), scheduler, state);
@@ -263,6 +293,8 @@ public final class BackfillWorker {
         }
 
         metrics.increment("backfill.batches.admitted", 1, "firm_id", admission.firmId());
+        logSink.log(LogLevel.INFO, "backfill.batch.admitted", clock.instant(),
+                batchIdentifiers(admission.firmId(), null));
         boolean aborted = false;
         try {
             for (EnumeratedEngagement item : batch.items()) {
@@ -272,7 +304,9 @@ public final class BackfillWorker {
                 }
                 Verdict verdict = gate.admit(item.productId(), item.firmId());
                 if (verdict == Verdict.HALTED) {
-                    state.markHalted();
+                    if (state.markHalted()) {
+                        logHalt(admission.firmId(), item.productId());
+                    }
                     aborted = true;
                     break;
                 }
@@ -286,7 +320,9 @@ public final class BackfillWorker {
             }
         } catch (AdmissionHaltedException abandoned) {
             // permit waiter abandoned on halt (D9): batch aborts, cursor unchanged
-            state.markHalted();
+            if (state.markHalted()) {
+                logHalt(admission.firmId(), null);
+            }
             aborted = true;
         }
         if (aborted) {
@@ -299,6 +335,8 @@ public final class BackfillWorker {
         }
         scheduler.markAdvanced(admission, nextCursor);
         metrics.increment("backfill.batches.completed", 1, "firm_id", admission.firmId());
+        logSink.log(LogLevel.INFO, "backfill.batch.completed", clock.instant(),
+                batchIdentifiers(admission.firmId(), null));
     }
 
     private EnumerationBatch fetch(BackfillScheduler.Admission admission) {
@@ -390,6 +428,8 @@ public final class BackfillWorker {
             state.resolved.incrementAndGet();
             metrics.increment("backfill.engagements.dlq", 1,
                     "product_id", item.productId());
+            logSink.log(LogLevel.ERROR, "fanout.dlq", clock.instant(),
+                    engagementDlqIdentifiers(item));
         } catch (AdmissionHaltedException abandoned) {
             metrics.increment("backfill.halt.abandoned", 1,
                     "product_id", item.productId(), "firm_id", item.firmId());
@@ -495,6 +535,48 @@ public final class BackfillWorker {
                 state.deadLettered.get());
     }
 
+    /** Batch-level identifiers (spec 004): firm_id (+ optional product_id). */
+    private static Map<IdentifierField, String> batchIdentifiers(String firmId, String productId) {
+        Map<IdentifierField, String> identifiers = new EnumMap<>(IdentifierField.class);
+        identifiers.put(IdentifierField.firm_id, firmId);
+        if (productId != null) {
+            identifiers.put(IdentifierField.product_id, productId);
+        }
+        return identifiers;
+    }
+
+    /**
+     * One {@code backfill.halt.observed} per first transition (spec 004): the
+     * run may observe halt at cycle level, per engagement, or via an abandoned
+     * permit — only the first observation logs.
+     */
+    private void logHalt(String firmId, String productId) {
+        Map<IdentifierField, String> identifiers = new EnumMap<>(IdentifierField.class);
+        if (firmId != null) {
+            identifiers.put(IdentifierField.firm_id, firmId);
+        }
+        if (productId != null) {
+            identifiers.put(IdentifierField.product_id, productId);
+        }
+        identifiers.put(IdentifierField.state, "halted");
+        logSink.log(LogLevel.WARN, "backfill.halt.observed", clock.instant(), identifiers);
+    }
+
+    /**
+     * Per-engagement dead-letter (error path, FR-004): the only log event that
+     * carries {@code engagement_id} besides retry.
+     */
+    private static Map<IdentifierField, String> engagementDlqIdentifiers(
+            EnumeratedEngagement item) {
+        Map<IdentifierField, String> identifiers = new EnumMap<>(IdentifierField.class);
+        identifiers.put(IdentifierField.product_id, item.productId());
+        identifiers.put(IdentifierField.firm_id, item.firmId());
+        identifiers.put(IdentifierField.engagement_id, item.engagementId());
+        identifiers.put(IdentifierField.state, DeadLetterUnitKind.BACKFILL_ENGAGEMENT
+                .name().toLowerCase(Locale.ROOT));
+        return identifiers;
+    }
+
     /** Per-run mutable counters shared by the cycle's jobs. */
     private static final class RunState {
         final AtomicLong resolved = new AtomicLong();
@@ -513,8 +595,9 @@ public final class BackfillWorker {
             return haltObservedAt.get() != null;
         }
 
-        void markHalted() {
-            haltObservedAt.compareAndSet(null, clock.instant());
+        /** First-observer wins: true only on the transition into halt. */
+        boolean markHalted() {
+            return haltObservedAt.compareAndSet(null, clock.instant());
         }
     }
 }

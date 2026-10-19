@@ -65,6 +65,19 @@ class FanOutEnginePublishTest {
         assertThat(fixture.metrics.total("fanout.chunks.completed")).isEqualTo(2);
         assertThat(fixture.metrics.total("fanout.rows.resolved")).isEqualTo(1_000);
         assertThat(fixture.metrics.saw("fanout.publish_to_pending")).isTrue();
+        var freshness = fixture.metrics.getTimers().stream()
+                .filter(t -> t.name().equals("fanout.publish_to_pending"))
+                .findFirst()
+                .orElseThrow();
+        assertThat(freshness.tags())
+                .as("freshness timer carries product_id + publish_id (spec 005, FR-002)")
+                .containsExactly("product_id", FanOutFixture.PRODUCT,
+                        "publish_id", FanOutFixture.PUBLISH);
+        assertThat(fixture.metrics.gaugeNames())
+                .containsExactly("fanout.checkpoint.lag.chunks");
+        assertThat(fixture.metrics.getGauges().getLast().value())
+                .as("checkpoint lag gauge ends at 0 when the run completes")
+                .isEqualTo(0.0);
         assertThat(fixture.metrics.saw("fanout.backpressure")).isFalse();
         assertThat(fixture.metrics.saw("fanout.downstream.inflight.hwm")).isFalse();
         assertThat(fixture.metrics.saw("fanout.retry")).isFalse();

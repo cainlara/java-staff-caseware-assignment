@@ -30,7 +30,13 @@ final class FanOutFixture {
     static final String PRODUCT = "prod-1";
     static final String PUBLISH = "pub-1";
     static final String TO_VERSION = "v2";
-    static final Instant PUBLISHED_AT = Instant.parse("2026-10-18T10:00:00Z");
+    /**
+     * Fixture publish instant == the FakeClock start: the freshness timer
+     * (spec 005, research D4) measures from {@code publishedAt}, so fixture
+     * runs keep the same deterministic durations as the pre-change
+     * run-entry base.
+     */
+    static final Instant PUBLISHED_AT = Instant.parse("2026-10-18T12:00:00Z");
 
     /**
      * Metric counter allowlist for clean hot-path runs (spec FR-070/FR-071):
@@ -42,6 +48,10 @@ final class FanOutFixture {
             "fanout.chunks.started", "fanout.chunks.completed",
             "fanout.rows.resolved", "fanout.cas.reapply",
             "fanout.duplicate.run", "fanout.dlq", "fanout.retry");
+
+    /** Hot-path gauge allowlist (spec 005: checkpoint lag only). */
+    static final List<String> HOT_PATH_GAUGE_ALLOWLIST = List.of(
+            "fanout.checkpoint.lag.chunks");
 
     final FakeEligibilitySource eligibility = new FakeEligibilitySource();
     final InMemoryCheckpointStore store = new InMemoryCheckpointStore();
@@ -147,5 +157,11 @@ final class FanOutFixture {
         org.assertj.core.api.Assertions.assertThat(metrics.counterNames())
                 .as("metric names stay within the FR-071 allowlist")
                 .isSubsetOf(HOT_PATH_COUNTER_ALLOWLIST);
+        org.assertj.core.api.Assertions.assertThat(metrics.timerNames())
+                .as("hot-path timers stay within the spec-005 allowlist")
+                .isSubsetOf(List.of("fanout.publish_to_pending"));
+        org.assertj.core.api.Assertions.assertThat(metrics.gaugesWithin(HOT_PATH_GAUGE_ALLOWLIST))
+                .as("hot-path gauges stay within the spec-005 allowlist")
+                .isTrue();
     }
 }

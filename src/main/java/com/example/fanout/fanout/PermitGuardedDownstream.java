@@ -154,11 +154,17 @@ public final class PermitGuardedDownstream {
         } finally {
             inFlight.decrementAndGet();
             budget.release();
+            metrics.increment("fanout.downstream.completed", 1, "product_id", productId);
         }
     }
 
-    /** Current permit-held count (tests/metrics). */
-    public int inflight() {
+    /**
+     * Current permit-held count (0..C at all times): the binding source for
+     * the {@code fanout.downstream.inflight} gauge and the saturation alert's
+     * pinned-at-C probe (spec 005). Read-only observation — no behavior
+     * change.
+     */
+    public int inFlight() {
         return inFlight.get();
     }
 
