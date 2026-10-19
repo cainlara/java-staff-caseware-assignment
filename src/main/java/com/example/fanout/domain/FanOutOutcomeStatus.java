@@ -14,5 +14,17 @@ public enum FanOutOutcomeStatus {
     /** Cursor RUNNING and claimed by another live run (duplicate trigger racing an active run). */
     SKIPPED_IN_PROGRESS,
     /** A unit exhausted retries, was dead-lettered, alert incremented (FR-041). */
-    FAILED_DEAD_LETTERED
+    FAILED_DEAD_LETTERED,
+    /**
+     * Halt switch observed while chunks remained pending (FR-030): no further
+     * admission, the cursor holds the completed prefix, and re-invoking the same
+     * trigger resumes from it (FR-042).
+     */
+    HALTED,
+    /**
+     * Remaining chunks blocked by the per-product / per-firm gates (FR-040):
+     * work is neither dead-lettered nor buffered, the cursor holds the completed
+     * prefix, and re-invoking the same trigger re-derives the gap (FR-043).
+     */
+    GATED
 }

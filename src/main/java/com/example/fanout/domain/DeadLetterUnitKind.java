@@ -14,5 +14,11 @@ public enum DeadLetterUnitKind {
     /** Cursor read/decode/advance failure. */
     CURSOR_WRITE,
     /** Supersede plan computation (withdrawn marker / next-version selection). */
-    SUPERSEDE_PLAN
+    SUPERSEDE_PLAN,
+    /** One backfill engagement's load, compare, and write pipeline. */
+    BACKFILL_ENGAGEMENT,
+    /** One backfill enumeration fetch (including cursor store read failures). */
+    BACKFILL_BATCH,
+    /** Backfill cursor advance, complete, or decode failure (chunkIndex = -1). */
+    BACKFILL_CURSOR
 }

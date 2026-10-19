@@ -166,6 +166,40 @@ weaknesses plainly.
 Rationale: a summary shown to a user in March may need to be defended during a
 regulatory review in November; only documented, reproducible reasoning survives that.
 
+### IX. Java Import and Type Reference Conventions
+
+- **MUST** use imported simple type names instead of fully qualified class or interface names in Java source code.
+- **MUST** add the required `import` declarations at the beginning of the compilation unit and use the corresponding simple names in fields, method signatures, parameters, local variables, generic type arguments, annotations, and object construction.
+- **MUST NOT** use fully qualified names such as `java.util.Set`, `java.util.List`, or `java.util.HashMap` inline in declarations or executable code when a normal import can be used.
+- **MUST** prefer explicit imports over wildcard imports (`import java.util.*;`).
+- **MUST** resolve simple-name conflicts using a clear, consistent strategy. If two types have the same simple name, use an explicit project-approved resolution strategy rather than fully qualifying types indiscriminately.
+- **MUST** review newly created and modified Java files for violations before considering an implementation complete.
+
+**Examples**
+
+Preferred:
+```java
+import java.util.HashSet;
+import java.util.Set;
+
+public Set<String> findRoles() {
+    Set<String> roles = new HashSet<>();
+    return roles;
+}
+```
+
+Prohibited when imports can be used:
+```java
+public java.util.Set<String> findRoles() {
+    java.util.Set<String> roles = new java.util.HashSet<>();
+    return roles;
+}
+```
+
+**Scope:** All production and test Java source files, including nested generic types and method signatures.
+
+**Exceptions:** Fully qualified names are permitted only when required to disambiguate conflicting simple names or to satisfy a specific documented technical constraint. Any exception should be minimal and justified.
+
 ## Governance
 
 - This constitution supersedes all other practices and preferences for this project.
