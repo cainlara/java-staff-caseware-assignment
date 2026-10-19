@@ -27,11 +27,17 @@ public final class RecordingFanOutMetrics implements FanOutMetrics {
             "backfill.admit.reject.firm",
             "backfill.halt.abandoned", "backfill.permit.park",
             "backfill.downstream.inflight.hwm", "fanout.dlq", "fanout.retry",
-            "fanout.cas.reapply");
+            "fanout.cas.reapply", "fanout.downstream.completed");
 
     /** Backfill-path timer allowlist (spec FR-053/FR-032). */
     public static final List<String> BACKFILL_TIMER_ALLOWLIST = List.of(
             "backfill.halt.drain");
+
+    /**
+     * Backfill-path gauge allowlist (spec 005 additive gauge hook).
+     */
+    public static final List<String> BACKFILL_GAUGE_ALLOWLIST = List.of(
+            "fanout.dlq.depth");
 
     public record CounterCall(String name, long delta, List<String> tags) {
     }
@@ -39,8 +45,12 @@ public final class RecordingFanOutMetrics implements FanOutMetrics {
     public record TimerCall(String name, Duration duration, List<String> tags) {
     }
 
+    public record GaugeCall(String name, double value, List<String> tags) {
+    }
+
     private final List<CounterCall> counters = new ArrayList<>();
     private final List<TimerCall> timers = new ArrayList<>();
+    private final List<GaugeCall> gauges = new ArrayList<>();
 
     @Override
     public synchronized void increment(String name, long delta, String... tags) {
@@ -58,12 +68,27 @@ public final class RecordingFanOutMetrics implements FanOutMetrics {
         timers.add(new TimerCall(name, duration, List.of(Objects.requireNonNull(tags, "tags"))));
     }
 
+    @Override
+    public synchronized void gauge(String name, double value, String... tags) {
+        validateName(name);
+        List<String> tagList = List.of(Objects.requireNonNull(tags, "tags"));
+        if (tagList.size() % 2 != 0) {
+            throw new IllegalArgumentException("tags must be even-length key/value pairs");
+        }
+        gauges.add(new GaugeCall(name, value, tagList));
+    }
+
     public synchronized List<CounterCall> getCounters() {
         return List.copyOf(counters);
     }
 
     public synchronized List<TimerCall> getTimers() {
         return List.copyOf(timers);
+    }
+
+    /** Recorded gauge calls, in emission order. */
+    public synchronized List<GaugeCall> getGauges() {
+        return List.copyOf(gauges);
     }
 
     /** Sum of recorded deltas for one counter name (0 when never emitted). */
@@ -76,16 +101,35 @@ public final class RecordingFanOutMetrics implements FanOutMetrics {
         return counters.stream().filter(c -> c.name().equals(name)).count();
     }
 
-    /** True when the counter name was emitted at least once. */
+    /** True when the counter, timer, or gauge name was emitted at least once. */
     public synchronized boolean saw(String name) {
         return counters.stream().anyMatch(c -> c.name().equals(name))
-                || timers.stream().anyMatch(t -> t.name().equals(name));
+                || timers.stream().anyMatch(t -> t.name().equals(name))
+                || gauges.stream().anyMatch(g -> g.name().equals(name));
     }
 
     /** Distinct counter names emitted (for allowlist assertions). */
     public synchronized Set<String> counterNames() {
         return counters.stream().map(CounterCall::name).collect(
                 Collectors.toUnmodifiableSet());
+    }
+
+    /** Distinct gauge names emitted (for allowlist assertions). */
+    public synchronized Set<String> gaugeNames() {
+        return gauges.stream().map(GaugeCall::name).collect(
+                Collectors.toUnmodifiableSet());
+    }
+
+    /** True when every emitted gauge name is inside the given allowlist. */
+    public synchronized boolean gaugesWithin(List<String> allowlist) {
+        return gaugeNames().stream().allMatch(allowlist::contains);
+    }
+
+    /** True when no emitted meter name is outside the given allowlist. */
+    public synchronized boolean allWithin(List<String> allowlist) {
+        return allowlist.containsAll(counterNames())
+                && allowlist.containsAll(timerNames())
+                && allowlist.containsAll(gaugeNames());
     }
 
     /** Sum of recorded deltas for one counter name filtered by a tag pair. */

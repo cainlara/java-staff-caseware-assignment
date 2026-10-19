@@ -33,7 +33,13 @@ public final class FakeDeadLetterStore implements DeadLetterStore {
         return List.copyOf(records);
     }
 
-    public synchronized int count() {
+    /** Test hook: empty the store (alert clear scenarios). */
+    public synchronized void clear() {
+        records.clear();
+    }
+
+    @Override
+    public synchronized long count() {
         return records.size();
     }
 }

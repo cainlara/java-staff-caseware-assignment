@@ -62,7 +62,7 @@ class PermitGuardedDownstreamTest {
             assertThat(client.calls()).isEqualTo(3);
             assertThat(client.max()).isEqualTo(3);
             assertThat(budget.available()).isZero();
-            assertThat(guard.inflight()).isEqualTo(3);
+            assertThat(guard.inFlight()).isEqualTo(3);
             assertThat(fixture.metrics.total("fanout.backpressure")).isPositive();
             assertThat(fixture.metrics.total("fanout.downstream.inflight.hwm"))
                     .isBetween(1L, 3L);
@@ -77,7 +77,7 @@ class PermitGuardedDownstreamTest {
 
         assertThat(client.max()).isEqualTo(3);
         assertThat(budget.available()).isEqualTo(3);
-        assertThat(guard.inflight()).isZero();
+        assertThat(guard.inFlight()).isZero();
         assertThat(client.calls()).isEqualTo(10);
         assertThat(fixture.metrics.total("fanout.downstream.inflight.hwm"))
                 .isBetween(1L, 3L);
@@ -111,7 +111,7 @@ class PermitGuardedDownstreamTest {
         assertThat(backpressureDuringWait.get()).isEqualTo(2);
         assertThat(delays).hasSize(2);
         assertThat(budget.available()).isEqualTo(3);
-        assertThat(guard.inflight()).isZero();
+        assertThat(guard.inFlight()).isZero();
         assertThat(fixture.metrics.total("fanout.retry")).isEqualTo(2);
         assertThat(fixture.metrics.total("fanout.backpressure")).isZero();
         assertThat(fixture.metrics.total("fanout.downstream.inflight.hwm")).isEqualTo(1);
@@ -141,7 +141,7 @@ class PermitGuardedDownstreamTest {
         assertThat(fixture.deadLetters.byEvent("pub-2")).hasSize(1);
         assertThat(fixture.metrics.total("fanout.dlq")).isEqualTo(1);
         assertThat(budget.available()).isEqualTo(3); // every permit returned
-        assertThat(guard.inflight()).isZero();
+        assertThat(guard.inFlight()).isZero();
         assertThat(client.inFlight()).isZero();
     }
 
@@ -173,7 +173,7 @@ class PermitGuardedDownstreamTest {
 
         assertThat(client.max()).isEqualTo(1);
         assertThat(budget.available()).isEqualTo(1);
-        assertThat(guard.inflight()).isZero();
+        assertThat(guard.inFlight()).isZero();
     }
 
     @Test
@@ -212,7 +212,7 @@ class PermitGuardedDownstreamTest {
         assertThat(client.calls()).isZero();
         assertThat(waits.get()).isEqualTo(6);
         assertThat(fixture.metrics.total("fanout.backpressure")).isEqualTo(6);
-        assertThat(guard.inflight()).isZero();
+        assertThat(guard.inFlight()).isZero();
         assertThat(fixture.deadLetters.count()).isZero();
     }
 
