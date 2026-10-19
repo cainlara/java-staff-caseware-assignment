@@ -11,6 +11,8 @@ import com.example.fanout.fakes.RecordingFanOutMetrics;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -112,7 +114,7 @@ class IngestServiceReorderingTest {
         assertThat(downstream.getCallCount()).isZero();
     }
 
-    private java.util.Optional<IngestedPublish> effectiveFrom(InMemoryCheckpointStore store) {
+    private Optional<IngestedPublish> effectiveFrom(InMemoryCheckpointStore store) {
         var repo = new IngestProgressRepository(store);
         return EffectiveVersion.selectEffective(loadAll(repo));
     }

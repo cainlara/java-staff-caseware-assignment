@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.fanout.adapters.inmemory.InMemoryCheckpointStore;
 import com.example.fanout.adapters.inmemory.RecordingFanOutTriggerSink;
-import com.example.fanout.domain.FanOutTriggerKind;
 import com.example.fanout.domain.TemplatePublished;
 import com.example.fanout.domain.TemplateWithdrawn;
 import com.example.fanout.fakes.FakeDownstreamLoadClient;
@@ -12,9 +11,10 @@ import com.example.fanout.fakes.RecordingFanOutMetrics;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import org.junit.jupiter.api.Test;
 
@@ -118,8 +118,8 @@ class IngestPermutationTest {
      */
     private static String snapshotFunctionalState(IngestProgressRepository progress, InMemoryCheckpointStore store) {
         TreeSet<String> processedPublishes = new TreeSet<>();
-        Map<String, String> effectiveByProduct = new java.util.TreeMap<>();
-        Map<String, String> resolvedWithdraws = new java.util.TreeMap<>();
+        Map<String, String> effectiveByProduct = new TreeMap<>();
+        Map<String, String> resolvedWithdraws = new TreeMap<>();
 
         for (String productId : List.of("prod-a", "prod-b")) {
             List<IngestedPublish> publishes = progress.productPublishes(productId).stream()
@@ -150,9 +150,9 @@ class IngestPermutationTest {
             return;
         }
         for (int i = start; i < items.size(); i++) {
-            java.util.Collections.swap(items, start, i);
+            Collections.swap(items, start, i);
             permute(items, start + 1, result);
-            java.util.Collections.swap(items, start, i);
+            Collections.swap(items, start, i);
         }
     }
 }

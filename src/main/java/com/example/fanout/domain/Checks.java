@@ -1,8 +1,14 @@
 package com.example.fanout.domain;
 
+import java.util.Objects;
+
 final class Checks {
 
     private Checks() {
+    }
+
+    static <T> T requireNonNull(T value, String fieldName) {
+        return Objects.requireNonNull(value, fieldName + " must not be null");
     }
 
     static String requireNonBlank(String value, String fieldName) {
