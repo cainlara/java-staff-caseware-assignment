@@ -65,6 +65,7 @@ public final class FanOutEngine {
     private final TaskRunner taskRunner;
     private final Clock clock;
     private final RetryExecutor retryExecutor;
+    private final AdmissionGate gate;
 
     /** In-process live-run registry: one live runner per run identity. */
     private final Set<RunKey> activeRuns = ConcurrentHashMap.newKeySet();
@@ -80,6 +81,23 @@ public final class FanOutEngine {
             BackoffWaiter backoffWaiter,
             Clock clock,
             JitterSource jitterSource) {
+        this(eligibility, indexWriter, cursors, deadLetterStore, metrics, config, taskRunner,
+                backoffWaiter, clock, jitterSource, AdmissionGate.admitAll(metrics));
+    }
+
+    /** Gate-aware constructor (feature 004): halt and staged enablement admission. */
+    public FanOutEngine(
+            EngagementEligibilitySource eligibility,
+            IndexWriter indexWriter,
+            FanOutCursorRepository cursors,
+            DeadLetterStore deadLetterStore,
+            FanOutMetrics metrics,
+            FanOutConfig config,
+            TaskRunner taskRunner,
+            BackoffWaiter backoffWaiter,
+            Clock clock,
+            JitterSource jitterSource,
+            AdmissionGate gate) {
         this.eligibility = Objects.requireNonNull(eligibility, "eligibility must not be null");
         this.indexWriter = Objects.requireNonNull(indexWriter, "indexWriter must not be null");
         this.cursors = Objects.requireNonNull(cursors, "cursors must not be null");
@@ -90,6 +108,7 @@ public final class FanOutEngine {
         Objects.requireNonNull(backoffWaiter, "backoffWaiter must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         Objects.requireNonNull(jitterSource, "jitterSource must not be null");
+        this.gate = Objects.requireNonNull(gate, "gate must not be null");
         this.retryExecutor = new RetryExecutor(config, backoffWaiter, clock, jitterSource,
                 metrics, deadLetterStore);
     }
@@ -236,15 +255,35 @@ public final class FanOutEngine {
             return new FanOutRunOutcome(FanOutOutcomeStatus.COMPLETED, eventId, totalChunks, 0, 0);
         }
 
-        // 7. schedule remaining chunks through the fair scheduler on the runner
+        // 7. live run-level halt admission (FR-030): pending chunks stay behind
+        //    the durable prefix; the trigger is not dropped, only deferred
+        if (gate.isHalted()) {
+            return new FanOutRunOutcome(FanOutOutcomeStatus.HALTED, eventId, totalChunks, 0, 0);
+        }
+
+        // 8. schedule remaining chunks through the fair scheduler on the runner,
+        //    each pick re-observing live admission (halt / staged enablement)
         var context = new RunContext(kind, eventId, productId, totalChunks,
                 kind == FanOutRunKind.PUBLISH, toVersion, nextVersion);
         List<FanOutTask> remaining = List.copyOf(chunks.subList(startChunk, totalChunks));
         var scheduler = new FairShardScheduler(remaining, config.poolBound(),
-                config.firmInFlightCap());
-        scheduler.runAll(taskRunner, task -> executeChunk(task, context));
+                config.firmInFlightCap(),
+                task -> gate.admit(task.productId(), task.firmId())
+                        == AdmissionGate.Verdict.ADMIT);
+        FairShardScheduler.SchedulerResult scheduled =
+                scheduler.runAllWithResult(taskRunner, task -> executeChunk(task, context));
+        if (scheduled == FairShardScheduler.SchedulerResult.AWAITING_ADMISSION) {
+            // halt or gates hold the remaining chunks: the cursor keeps the
+            // contiguous prefix (advance already persisted it) and never
+            // completes; the trigger resumes from it (FR-042 / FR-043)
+            FanOutOutcomeStatus held = gate.isHalted()
+                    ? FanOutOutcomeStatus.HALTED
+                    : FanOutOutcomeStatus.GATED;
+            return new FanOutRunOutcome(held, eventId, totalChunks,
+                    context.rowsResolved.get(), context.deadLetterCount.get());
+        }
 
-        // 8. complete the cursor; record the freshness timer (FR-071 / SC-010)
+        // 9. complete the cursor; record the freshness timer (FR-071 / SC-010)
         cursors.complete(kind, eventId, productId, totalChunks);
         recordPublishTimer(start, productId);
 
@@ -363,8 +402,8 @@ public final class FanOutEngine {
      * stored current version (the writer stores +1); updatedAt from the
      * intent (the later writer).
      */
-    static PendingIndexRow merge(PendingIndexRow current, PendingIndexRow intent,
-                                 boolean publishKind) {
+    public static PendingIndexRow merge(PendingIndexRow current, PendingIndexRow intent,
+                                        boolean publishKind) {
         String decision = publishKind ? current.decision() : intent.decision();
         List<String> pinnedRanges = publishKind ? current.pinnedRanges() : intent.pinnedRanges();
         String summaryKey = publishKind ? current.summaryKey() : intent.summaryKey();

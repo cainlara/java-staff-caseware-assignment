@@ -12,6 +12,7 @@ import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * Per-firm round-robin chunk scheduler (spec R3, FR-010…FR-012; research.md D4).
@@ -31,19 +32,34 @@ import java.util.function.Consumer;
  */
 public final class FairShardScheduler {
 
+    /** Why {@code runAllWithResult} terminated. */
+    public enum SchedulerResult {
+        /** Every chunk resolved. */
+        COMPLETED,
+        /** Chunks remain pending; none of the pending heads is admissible. */
+        AWAITING_ADMISSION
+    }
+
     private final Map<String, Deque<FanOutTask>> pendingByFirm = new ConcurrentHashMap<>();
     private final NavigableSet<String> pendingFirms = new TreeSet<>();
     private final Map<String, Semaphore> firmPermits = new ConcurrentHashMap<>();
     private final Semaphore poolPermits;
     private final int poolBound;
     private final int firmInFlightCap;
+    private final Predicate<FanOutTask> admission;
     private String scanCursor;
 
     private long submitted;
     private long completed;
 
     public FairShardScheduler(List<FanOutTask> chunks, int poolBound, int firmInFlightCap) {
+        this(chunks, poolBound, firmInFlightCap, task -> true);
+    }
+
+    public FairShardScheduler(List<FanOutTask> chunks, int poolBound, int firmInFlightCap,
+                              Predicate<FanOutTask> admission) {
         Objects.requireNonNull(chunks, "chunks must not be null");
+        this.admission = Objects.requireNonNull(admission, "admission must not be null");
         if (poolBound < 1) {
             throw new IllegalArgumentException("poolBound must be >= 1");
         }
@@ -68,6 +84,17 @@ public final class FairShardScheduler {
      * invariants are released).
      */
     public void runAll(TaskRunner runner, Consumer<FanOutTask> chunkHandler) {
+        runAllWithResult(runner, chunkHandler);
+    }
+
+    /**
+     * Like {@link #runAll} but reports why it terminated: {@link
+     * SchedulerResult#COMPLETED} once every chunk resolved, or {@link
+     * SchedulerResult#AWAITING_ADMISSION} when chunks remain pending behind
+     * non-admissible heads with nothing in flight.
+     */
+    public SchedulerResult runAllWithResult(TaskRunner runner,
+                                            Consumer<FanOutTask> chunkHandler) {
         Objects.requireNonNull(runner, "runner must not be null");
         Objects.requireNonNull(chunkHandler, "chunkHandler must not be null");
         while (true) {
@@ -83,7 +110,10 @@ public final class FairShardScheduler {
             synchronized (this) {
                 if (submitted == completed) {
                     if (pendingFirms.isEmpty()) {
-                        return;
+                        return SchedulerResult.COMPLETED;
+                    }
+                    if (!anyPendingHeadAdmits()) {
+                        return SchedulerResult.AWAITING_ADMISSION;
                     }
                     // nothing in flight yet a pick failed: firm permits must be
                     // free (a completion released them after our pick attempt).
@@ -128,6 +158,9 @@ public final class FairShardScheduler {
                 pendingFirms.remove(firm);
                 continue;
             }
+            if (!admission.test(queue.peek())) {
+                continue; // non-ADMIT head: skip the firm, never queue ahead
+            }
             Semaphore permits = firmPermits.get(firm);
             if (!permits.tryAcquire()) {
                 continue; // firm at its in-flight cap: skip, do not queue ahead
@@ -140,6 +173,17 @@ public final class FairShardScheduler {
             return task;
         }
         return null;
+    }
+
+    /** True when at least one pending head chunk would be admitted. */
+    private boolean anyPendingHeadAdmits() {
+        for (String firm : pendingFirms) {
+            Deque<FanOutTask> queue = pendingByFirm.get(firm);
+            if (queue != null && !queue.isEmpty() && admission.test(queue.peek())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private List<String> scanOrder() {

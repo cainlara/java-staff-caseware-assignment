@@ -65,6 +65,11 @@ final class FanOutFixture {
     }
 
     FanOutEngine newEngine() {
+        return newEngine(AdmissionGate.admitAll(metrics));
+    }
+
+    /** Fresh engine with an explicit admission gate (feature 004 tests). */
+    FanOutEngine newEngine(AdmissionGate gate) {
         return new FanOutEngine(
                 eligibility,
                 writer,
@@ -75,7 +80,8 @@ final class FanOutFixture {
                 runner,
                 clock::advance,
                 clock,
-                new SeededJitter(42L));
+                new SeededJitter(42L),
+                gate);
     }
 
     /** Fresh engine over the same durable stores (simulates a second instance). */

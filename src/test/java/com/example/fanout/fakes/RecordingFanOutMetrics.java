@@ -15,6 +15,24 @@ import java.util.stream.Collectors;
  */
 public final class RecordingFanOutMetrics implements FanOutMetrics {
 
+    /**
+     * Backfill-path counter allowlist (spec FR-053, contracts/backfill-worker.md):
+     * every counter the backfill run may emit, identifiers and measurements only.
+     */
+    public static final List<String> BACKFILL_COUNTER_ALLOWLIST = List.of(
+            "backfill.batches.admitted", "backfill.batches.completed",
+            "backfill.engagements.written", "backfill.engagements.noop",
+            "backfill.engagements.dlq",
+            "backfill.admit.reject.halt", "backfill.admit.reject.product",
+            "backfill.admit.reject.firm",
+            "backfill.halt.abandoned", "backfill.permit.park",
+            "backfill.downstream.inflight.hwm", "fanout.dlq", "fanout.retry",
+            "fanout.cas.reapply");
+
+    /** Backfill-path timer allowlist (spec FR-053/FR-032). */
+    public static final List<String> BACKFILL_TIMER_ALLOWLIST = List.of(
+            "backfill.halt.drain");
+
     public record CounterCall(String name, long delta, List<String> tags) {
     }
 
@@ -68,6 +86,29 @@ public final class RecordingFanOutMetrics implements FanOutMetrics {
     public synchronized Set<String> counterNames() {
         return counters.stream().map(CounterCall::name).collect(
                 Collectors.toUnmodifiableSet());
+    }
+
+    /** Sum of recorded deltas for one counter name filtered by a tag pair. */
+    public synchronized long total(String name, String tagKey, String tagValue) {
+        return counters.stream()
+                .filter(c -> c.name().equals(name))
+                .filter(c -> hasTag(c.tags(), tagKey, tagValue))
+                .mapToLong(CounterCall::delta)
+                .sum();
+    }
+
+    /** True when every emitted counter name is inside the given allowlist. */
+    public synchronized boolean countersWithin(List<String> allowlist) {
+        return counterNames().stream().allMatch(allowlist::contains);
+    }
+
+    private static boolean hasTag(List<String> tags, String key, String value) {
+        for (int i = 0; i + 1 < tags.size(); i += 2) {
+            if (tags.get(i).equals(key) && tags.get(i + 1).equals(value)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Distinct timer names emitted (for allowlist assertions). */

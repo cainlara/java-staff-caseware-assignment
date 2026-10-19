@@ -6,3 +6,9 @@ target/
 *.jar
 *.war
 .mvn/wrapper/maven-wrapper.jar
+.gradle/
+build/
+*.log
+.idea/
+*.iml
+.DS_Store

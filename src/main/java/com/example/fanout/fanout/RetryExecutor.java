@@ -27,17 +27,26 @@ import java.util.function.Supplier;
  */
 public final class RetryExecutor {
 
-    private final FanOutConfig config;
+    private final RetryPolicy policy;
     private final BackoffWaiter backoffWaiter;
     private final Clock clock;
     private final JitterSource jitterSource;
     private final FanOutMetrics metrics;
     private final DeadLetterStore deadLetterStore;
 
+    /** Delivered entry point: retry knobs carried by {@link FanOutConfig}. */
     public RetryExecutor(FanOutConfig config, BackoffWaiter backoffWaiter, Clock clock,
                          JitterSource jitterSource, FanOutMetrics metrics,
                          DeadLetterStore deadLetterStore) {
-        this.config = Objects.requireNonNull(config, "config must not be null");
+        this(RetryPolicy.from(config), backoffWaiter, clock, jitterSource, metrics,
+                deadLetterStore);
+    }
+
+    /** Shared-policy entry point (research.md D10): backfill passes its own policy. */
+    public RetryExecutor(RetryPolicy policy, BackoffWaiter backoffWaiter, Clock clock,
+                         JitterSource jitterSource, FanOutMetrics metrics,
+                         DeadLetterStore deadLetterStore) {
+        this.policy = Objects.requireNonNull(policy, "policy must not be null");
         this.backoffWaiter = Objects.requireNonNull(backoffWaiter, "backoffWaiter must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         this.jitterSource = Objects.requireNonNull(jitterSource, "jitterSource must not be null");
@@ -61,7 +70,7 @@ public final class RetryExecutor {
         if (chunkIndex < -1) {
             throw new IllegalArgumentException("chunkIndex must be >= -1");
         }
-        int maxAttempts = config.retryMaxAttempts();
+        int maxAttempts = policy.maxAttempts();
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
                 return unit.get();
@@ -79,12 +88,12 @@ public final class RetryExecutor {
     /** Bounded exponential delay with jitter: min(max, base * 2^(n-1)) * factor. */
     private Duration delayFor(int attempt) {
         int exponent = Math.min(attempt - 1, 30);
-        Duration uncapped = config.retryBaseDelay().multipliedBy(1L << exponent);
-        Duration capped = uncapped.compareTo(config.retryMaxDelay()) > 0
-                ? config.retryMaxDelay()
+        Duration uncapped = policy.baseDelay().multipliedBy(1L << exponent);
+        Duration capped = uncapped.compareTo(policy.maxDelay()) > 0
+                ? policy.maxDelay()
                 : uncapped;
-        double factor = config.jitterFactorMin()
-                + jitterSource.next() * (config.jitterFactorMax() - config.jitterFactorMin());
+        double factor = policy.jitterFactorMin()
+                + jitterSource.next() * (policy.jitterFactorMax() - policy.jitterFactorMin());
         return Duration.ofNanos(Math.round(capped.toNanos() * factor));
     }
 

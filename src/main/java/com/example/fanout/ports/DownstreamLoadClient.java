@@ -26,4 +26,19 @@ import com.example.fanout.domain.EngagementRef;
 public interface DownstreamLoadClient {
 
     String loadEngagement(EngagementRef ref);
+
+    /**
+     * Capture by bare identity — the backfill path, where a pre-feature
+     * engagement's current version is unknown until this call returns
+     * (research.md D1: {@link EngagementRef} would force a sentinel version).
+     * Delivered implementors keep compiling: the default fails loudly until a
+     * client opts into identifier capture; every backfill-relevant client
+     * overrides it.
+     *
+     * @throws UnsupportedOperationException when the client has not overridden it
+     */
+    default String loadEngagement(String engagementId, String firmId, String productId) {
+        throw new UnsupportedOperationException(
+                "identifier capture not implemented by " + getClass().getName());
+    }
 }
