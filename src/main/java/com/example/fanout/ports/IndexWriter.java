@@ -1,5 +1,7 @@
 package com.example.fanout.ports;
 
+import java.util.Optional;
+
 import com.example.fanout.domain.PendingIndexRow;
 
 /**
@@ -28,4 +30,22 @@ import com.example.fanout.domain.PendingIndexRow;
 public interface IndexWriter {
 
     WriteResult upsert(PendingIndexRow row);
+
+    /**
+     * Read side for the stale-rejection re-apply cycle (spec R4 / FR-021).
+     *
+     * <p>Returns the currently stored row for the idempotency triple
+     * {@code (engagementId, offeredVersion, state)}, or {@link java.util.Optional#empty()}
+     * if absent. Read-only: never writes, never loads engagement content, and
+     * never calls {@link DownstreamLoadClient}.
+     *
+     * <p><b>Read-your-writes</b>: a caller that just observed
+     * {@link WriteResult#WRITTEN} on the same thread/store instance MUST see
+     * that row here (satisfied trivially by the in-memory fake; a real adapter
+     * must provide read-your-writes for its own writes).
+     *
+     * <p>Null/blank arguments are rejected.
+     */
+    Optional<PendingIndexRow> find(
+            String engagementId, String offeredVersion, com.example.fanout.domain.PendingIndexState state);
 }

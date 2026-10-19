@@ -17,7 +17,15 @@ package com.example.fanout.ports;
  *   <li>{@link #PENDING_WITHDRAW} — resolution index of deferred withdraw ids
  *       for one (product, version); key id is {@code productId + US + version}.</li>
  *   <li>{@link #PRODUCT_PUBLISHES} — per-product ingest-ordered list of
- *       publish ids (all retained; arrival order recorded).</li>
+ *       publish ids (all retained; arrival order recorded).
+ * </ul>
+ *
+ * <p>Phase 3 kinds (fan-out, additive):
+ * <ul>
+ *   <li>{@link #FANOUT_CURSOR} — per-run chunk cursor; key id is
+ *       {@code FanOutRunKind token + US + eventId + US + productId}.</li>
+ *   <li>{@link #PRODUCT_WITHDRAWN_VERSION} — engine-owned withdrawn-version
+ *       marker list; key id is {@code productId}.</li>
  * </ul>
  */
 public enum CheckpointKind {
@@ -26,5 +34,7 @@ public enum CheckpointKind {
     WITHDRAW,
     PRODUCT_INGEST,
     PENDING_WITHDRAW,
-    PRODUCT_PUBLISHES
+    PRODUCT_PUBLISHES,
+    FANOUT_CURSOR,
+    PRODUCT_WITHDRAWN_VERSION
 }

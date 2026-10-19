@@ -4,8 +4,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
 import com.example.fanout.adapters.inmemory.InMemoryCheckpointStore;
+
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.junit.jupiter.api.Test;
 
 /**
@@ -108,9 +116,9 @@ class CheckpointStoreContractTest {
     void concurrentWriteIfAbsentHasExactlyOneWinner() throws Exception {
         var store = new InMemoryCheckpointStore();
         int threads = 8;
-        var barrier = new java.util.concurrent.CyclicBarrier(threads);
-        var winners = new java.util.concurrent.atomic.AtomicInteger();
-        var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        var barrier = new CyclicBarrier(threads);
+        var winners = new AtomicInteger();
+        var pool = Executors.newFixedThreadPool(threads);
         try {
             for (int i = 0; i < threads; i++) {
                 final int n = i;
@@ -126,7 +134,7 @@ class CheckpointStoreContractTest {
                 });
             }
             pool.shutdown();
-            assertThat(pool.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
         } finally {
             pool.shutdownNow();
         }
@@ -136,7 +144,7 @@ class CheckpointStoreContractTest {
     @Test
     void defaultMethodCompatibleWithReadOnlyImplementations() {
         CheckpointStore legacy = new CheckpointStore() {
-            private final java.util.Map<CheckpointKey, String> map = new java.util.HashMap<>();
+            private final Map<CheckpointKey, String> map = new HashMap<>();
 
             @Override
             public Optional<String> read(CheckpointKey key) {
@@ -160,5 +168,105 @@ class CheckpointStoreContractTest {
                 .isThrownBy(() -> store.writeIfAbsent(null, "x"));
         org.assertj.core.api.Assertions.assertThatNullPointerException()
                 .isThrownBy(() -> store.writeIfAbsent(PUBLISH, null));
+    }
+
+    // ---- v3: FANOUT_CURSOR claim/advance + PRODUCT_WITHDRAWN_VERSION marker
+    //     (contracts/checkpoint-store.md additive vectors) ----
+
+    @Test
+    void cursorClaimConcurrentWriteIfAbsentHasExactlyOneWinner() throws Exception {
+        var store = new InMemoryCheckpointStore();
+        var repo = new com.example.fanout.fanout.FanOutCursorRepository(store);
+        int threads = 8;
+        var barrier = new CyclicBarrier(threads);
+        var winners = new AtomicInteger();
+        var pool = Executors.newFixedThreadPool(threads);
+        try {
+            for (int i = 0; i < threads; i++) {
+                pool.submit(() -> {
+                    try {
+                        barrier.await();
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                    if (repo.claimRun(com.example.fanout.domain.FanOutRunKind.PUBLISH,
+                            "pub-9", "prod-9", 4)) {
+                        winners.incrementAndGet();
+                    }
+                });
+            }
+            pool.shutdown();
+            assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(winners.get()).isEqualTo(1);
+    }
+
+    @Test
+    void cursorClaimAdvanceCompleteRoundTrip() {
+        var repo = new com.example.fanout.fanout.FanOutCursorRepository(new InMemoryCheckpointStore());
+        assertThat(repo.claimRun(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-1", "prod-1", 3)).isTrue();
+
+        var running = repo.readRun(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-1", "prod-1");
+        assertThat(running).isPresent();
+        assertThat(running.get().status()).isEqualTo(com.example.fanout.domain.FanOutRunStatus.RUNNING);
+        assertThat(running.get().lastCompletedChunkIndex()).isEqualTo(-1);
+
+        repo.advance(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-1", "prod-1", 3, 1);
+        assertThat(repo.readRun(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-1", "prod-1").get()
+                .lastCompletedChunkIndex()).isEqualTo(1);
+
+        repo.complete(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-1", "prod-1", 3);
+        var complete = repo.readRun(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-1", "prod-1").get();
+        assertThat(complete.status()).isEqualTo(com.example.fanout.domain.FanOutRunStatus.COMPLETE);
+        assertThat(complete.lastCompletedChunkIndex()).isEqualTo(2);
+    }
+
+    @Test
+    void cursorCompleteRunDistinguishesDuplicateSkipFromMissing() {
+        var repo = new com.example.fanout.fanout.FanOutCursorRepository(new InMemoryCheckpointStore());
+        assertThat(repo.readRun(com.example.fanout.domain.FanOutRunKind.PUBLISH, "missing", "prod-1"))
+                .isEmpty();
+        repo.claimRun(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-2", "prod-1", 0);
+        repo.complete(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-2", "prod-1", 0);
+        var read = repo.readRun(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-2", "prod-1").get();
+        assertThat(read.status()).isEqualTo(com.example.fanout.domain.FanOutRunStatus.COMPLETE);
+        assertThat(read.totalChunks()).isZero();
+    }
+
+    @Test
+    void cursorRunKindSeparatesPublishAndSupersedeIdentities() {
+        var repo = new com.example.fanout.fanout.FanOutCursorRepository(new InMemoryCheckpointStore());
+        assertThat(repo.claimRun(com.example.fanout.domain.FanOutRunKind.PUBLISH, "evt-1", "prod-1", 1)).isTrue();
+        assertThat(repo.claimRun(com.example.fanout.domain.FanOutRunKind.WITHDRAW_SUPERSEDE,
+                "evt-1", "prod-1", 1)).isTrue();
+    }
+
+    @Test
+    void corruptCursorEncodingFailsLoudly() {
+        var store = new InMemoryCheckpointStore();
+        var repo = new com.example.fanout.fanout.FanOutCursorRepository(store);
+        var key = new CheckpointKey(CheckpointKind.FANOUT_CURSOR, "PUBLISH\u001Fpub-1\u001Fprod-1");
+        store.write(key, "RUNNING\u001Fnot-a-number\u001F-1");
+        org.assertj.core.api.Assertions.assertThatIllegalStateException()
+                .isThrownBy(() -> repo.readRun(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-1", "prod-1"))
+                .withMessageContaining("corrupt");
+        store.write(key, "BOGUS\u001F3\u001F-1");
+        org.assertj.core.api.Assertions.assertThatIllegalStateException()
+                .isThrownBy(() -> repo.readRun(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-1", "prod-1"));
+        store.write(key, "only-two\u001Fparts");
+        org.assertj.core.api.Assertions.assertThatIllegalStateException()
+                .isThrownBy(() -> repo.readRun(com.example.fanout.domain.FanOutRunKind.PUBLISH, "pub-1", "prod-1"));
+    }
+
+    @Test
+    void markerAppendIfAbsentIsIdempotentAndAccumulates() {
+        var repo = new com.example.fanout.fanout.FanOutCursorRepository(new InMemoryCheckpointStore());
+        repo.markWithdrawn("prod-1", "v2");
+        repo.markWithdrawn("prod-1", "v2");
+        repo.markWithdrawn("prod-1", "v3");
+        assertThat(repo.withdrawnVersions("prod-1")).containsExactly("v2", "v3");
+        assertThat(repo.withdrawnVersions("prod-missing")).isEmpty();
     }
 }

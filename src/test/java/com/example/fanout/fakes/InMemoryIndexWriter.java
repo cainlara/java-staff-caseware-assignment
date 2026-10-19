@@ -5,6 +5,7 @@ import com.example.fanout.ports.IndexWriter;
 import com.example.fanout.ports.WriteResult;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -66,6 +67,21 @@ public final class InMemoryIndexWriter implements IndexWriter {
                     row.updatedAt());
         });
         return result.get();
+    }
+
+    @Override
+    public Optional<PendingIndexRow> find(
+            String engagementId, String offeredVersion, com.example.fanout.domain.PendingIndexState state) {
+        Objects.requireNonNull(engagementId, "engagementId must not be null");
+        if (engagementId.isBlank()) {
+            throw new IllegalArgumentException("engagementId must be non-blank");
+        }
+        Objects.requireNonNull(offeredVersion, "offeredVersion must not be null");
+        if (offeredVersion.isBlank()) {
+            throw new IllegalArgumentException("offeredVersion must be non-blank");
+        }
+        Objects.requireNonNull(state, "state must not be null");
+        return Optional.ofNullable(rows.get(new Key(engagementId, offeredVersion, state)));
     }
 
     /** Test hook: current stored row for the idempotency triple, or null. */

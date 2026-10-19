@@ -5,6 +5,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Recording {@link FanOutMetrics} fake: captures counter and timer calls so
@@ -44,6 +46,34 @@ public final class RecordingFanOutMetrics implements FanOutMetrics {
 
     public synchronized List<TimerCall> getTimers() {
         return List.copyOf(timers);
+    }
+
+    /** Sum of recorded deltas for one counter name (0 when never emitted). */
+    public synchronized long total(String name) {
+        return counters.stream().filter(c -> c.name().equals(name)).mapToLong(CounterCall::delta).sum();
+    }
+
+    /** Number of recorded emissions for one counter name. */
+    public synchronized long count(String name) {
+        return counters.stream().filter(c -> c.name().equals(name)).count();
+    }
+
+    /** True when the counter name was emitted at least once. */
+    public synchronized boolean saw(String name) {
+        return counters.stream().anyMatch(c -> c.name().equals(name))
+                || timers.stream().anyMatch(t -> t.name().equals(name));
+    }
+
+    /** Distinct counter names emitted (for allowlist assertions). */
+    public synchronized Set<String> counterNames() {
+        return counters.stream().map(CounterCall::name).collect(
+                Collectors.toUnmodifiableSet());
+    }
+
+    /** Distinct timer names emitted (for allowlist assertions). */
+    public synchronized Set<String> timerNames() {
+        return timers.stream().map(TimerCall::name).collect(
+                Collectors.toUnmodifiableSet());
     }
 
     private static void validateName(String name) {
